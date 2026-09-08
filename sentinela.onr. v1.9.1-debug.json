@@ -1,0 +1,1050 @@
+// ==UserScript==
+// @name         Sentinela ONR
+// @namespace    guilherme.sentinela.onr
+// @version      1.9.1-debug
+// @author       Guilherme S. Costa
+// @description  Automação desligada por padrão — ligue pelo painel flutuante (canto inferior direito). Ligada, a cada 2h, dentro do horário de expediente (8h-18h, seg-sex), pergunta se você quer iniciar a atualização de pedidos do ONR - E-Protocolo no Asgard. Se confirmar, clica sozinho em Importar Pedidos > Confirmar, aguarda você autenticar o certificado e segue direto pro próximo passo; depois de Atualizar Pedidos > Confirmar, pergunta se deu certo. O painel também mostra o último horário de cada passo e permite forçar a execução na hora. Não digita nem armazena nenhuma senha — a autenticação do certificado é sempre feita manualmente por você.
+// v1.1: corrigido o seletor do menu lateral (usa o link real <a class="item-menu">, não o <div> que o envolve) e do ícone "Navegação" (por atributo title, não coordenadas fixas de tela).
+// v1.2: popup inicial agora tem botão "Fechar" (X) além de "Sim, iniciar"/"Adiar" — fechar só dispensa, pergunta de novo no próximo ciclo normal (2h). Corrigida a busca do item "Importar Pedidos"/"Atualizar Pedidos" no menu ☰: agora procura em <a>, <li>, <span> e <div> (não só <button>), exige visibilidade real na tela, evita pegar elementos "container", e o clique sobe até o ancestral clicável e dispara mousedown/mouseup além do .click() (para componentes Vue que não respondem a clique sintético simples). O clique no ☰ para reabrir o dropdown só é repetido se o item realmente não for encontrado, evitando fechar um dropdown que já estava aberto.
+// v1.3: confirmado via inspeção real do HTML do Asgard que os itens do menu ☰ (Importar Pedidos, Atualizar Pedidos etc.) são <button class="icon d-block p-1 text-left w-100 dropright pointer at-options at-bbottom">. Corrigida a comparação de texto para normalizar espaços/quebras de linha internas (o texto do botão no Vue pode vir com espaçamento extra ao redor do ícone) e adicionado um segundo modo de busca por "contém o texto" caso a igualdade exata falhe. Também passou a ignorar botões desabilitados (loading) na busca.
+// v1.4: (1) notificação nativa do Chrome agora também dispara junto do popup de "Sim, iniciar/Adiar/Fechar", pra avisar mesmo se a aba do Asgard não estiver em foco. (2) Depois de autenticar o certificado, em vez de tentar detectar sozinho o fim da ação, o script pergunta "Foi importado/atualizado com sucesso?" (Sim/Não), com notificação nativa também, e um botão extra "Fechar aba". Só ao confirmar Sim é que conta o tempo pro próximo passo. (3) Botão flutuante fixo (canto inferior direito) que abre um painel de auditoria: horário da última importação e da última atualização (com sucesso/falha), e um botão "Forçar execução agora" que roda o ciclo completo na hora, ignorando o horário de expediente e o agendamento normal. Histórico salvo em localStorage, sobrevive a recarregar a página.
+// v1.5: (1) removida a pergunta de confirmação do passo "Importar Pedidos" (intermediário) — agora só pergunta "deu certo?" no "Atualizar Pedidos" (passo final do ciclo); o Importar segue direto após dar tempo de autenticar. (2) Botão flutuante trocado para a imagem fornecida pelo usuário (embutida como ícone) e movido para o canto inferior direito. (3) Adicionado liga/desliga da automação dentro do painel — SEMPRE começa desligada em toda aba nova (não fica salvo/persistido de propósito); enquanto desligada, o script não pergunta nem agenda nada sozinho, só quando ligado manualmente pelo painel.
+// v1.6: corrigido bug real detectado em teste — no "Importar Pedidos" a v1.5 parou de esperar/fechar o modal de resultado (ex: "Não há mais pedidos para importar"), que ficava aberto bloqueando a tela; quando o "Atualizar Pedidos" tentava rodar 2 min depois, falhava por baixo desse modal ainda aberto. Agora o Importar Pedidos continua sem PERGUNTAR se deu certo, mas espera e clica sozinho no botão "Fechar" desse modal antes de seguir — fechando a etapa direito antes de passar pro próximo passo.
+// v1.7: no "Atualizar Pedidos" (passo final), depois de clicar em Confirmar, o script agora espera 10 minutos em silêncio (sem nenhum aviso na tela) antes de mostrar o popup "Foi concluído com sucesso?" — dá tempo real do Asgard processar e de você autenticar com calma. Só se aplica ao Atualizar Pedidos; o Importar Pedidos continua fechando o modal assim que ele aparecer, sem espera fixa.
+// v1.8: o painel de auditoria agora mostra também "Próximo ciclo previsto" — o horário real do próximo agendamento (o mesmo setTimeout que o script já usa internamente, refletindo corretamente Adiar/Forçar/fora do expediente), não um cálculo aproximado. Como Importar e Atualizar Pedidos disparam juntos no mesmo ciclo, é uma linha só cobrindo os dois passos.
+// v1.9: o script agora só inicializa (painel flutuante, popups, ciclo, tudo) se a página carregar já em .../app/v1/#/tarefas — em qualquer outra tela do Asgard, o script fica completamente inativo, sem aparecer nada. Só funciona se a URL já for #/tarefas no momento do carregamento da página; navegar internamente pra lá sem recarregar não ativa (precisa dar F5 na tela de tarefas).
+// v1.9.1-debug: versão TEMPORÁRIA de diagnóstico do bug relatado ("desliga sozinho" após confirmar Atualizar Pedidos, sem clicar em Desligar). Não achei a causa só lendo o código, então esta versão loga no console (F12 > aba Console) toda mudança de automacaoAtiva (com stack trace de quem chamou), todo disparo de cicloDePergunta/agendarProximoCiclo, e quando a aba entra/sai de segundo plano. Também expõe __sentinelaOnrDebug() pra consultar o estado a qualquer momento. Assim que reproduzir o bug de novo, mande um print do console (aberto ANTES de começar o teste) pra eu achar a causa raiz exata e tirar essa versão de debug.
+// @match        https://3rigoiania-go.sistemaasgard.com.br/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // O script só deve funcionar na página de tarefas (onde o menu ONR - E-Protocolo
+  // realmente existe). Se a página carregar em qualquer outra tela do Asgard, o
+  // script não inicializa nada — nem popup, nem painel flutuante, nem notificação.
+  // Só funciona se a URL já estiver em #/tarefas no momento do carregamento; navegar
+  // internamente pra lá sem recarregar a página não ativa o script (precisa dar F5).
+  if (!location.hash.includes('#/tarefas')) {
+    return;
+  }
+
+  const NOME_SCRIPT = 'Sentinela ONR';
+
+  // Automação começa sempre DESLIGADA em toda aba nova (não persiste entre aberturas
+  // da página, de propósito — pra nunca rodar sozinha sem você ligar explicitamente
+  // pelo painel de auditoria). Enquanto desligada, nenhum popup/notificação de ciclo
+  // aparece — o script fica quieto até você ligar.
+  // Só pra diagnosticar o bug relatado (painel mostrando "desligada" sem ninguém ter
+  // clicado em Desligar). Toda MUDANÇA passa por definirAutomacaoAtiva(), que loga
+  // quem chamou (com stack trace) no console (F12) — assim dá pra achar exatamente
+  // o ponto que está desligando sozinho. window.__sentinelaOnrDebug() também pode ser
+  // chamado a qualquer momento no console pra inspecionar o estado atual ao vivo.
+  let automacaoAtiva = false;
+
+  function definirAutomacaoAtiva(novoValor, origem) {
+    if (novoValor !== automacaoAtiva) {
+      console.warn(
+        '[Sentinela ONR][DEBUG] automacaoAtiva mudou de ' + automacaoAtiva + ' para ' + novoValor +
+          ' (origem: ' + origem + ', hora: ' + new Date().toLocaleTimeString('pt-BR') + '). Stack:',
+        new Error().stack
+      );
+    }
+    automacaoAtiva = novoValor;
+  }
+
+  window.__sentinelaOnrDebug = function () {
+    console.log('[Sentinela ONR][DEBUG] automacaoAtiva =', automacaoAtiva,
+      '| proximoCicloPrevistoEm =', typeof proximoCicloPrevistoEm !== 'undefined' && proximoCicloPrevistoEm
+        ? new Date(proximoCicloPrevistoEm).toLocaleString('pt-BR')
+        : proximoCicloPrevistoEm,
+      '| timer ativo =', !!window.__sentinelaOnrTimer,
+      '| document.hidden =', document.hidden,
+      '| document.visibilityState =', document.visibilityState);
+  };
+
+  // --- Configurações ---
+  const INTERVALO_CICLO_HORAS = 2;        // de quanto em quanto tempo perguntar
+  const ADIAR_MINUTOS = 15;               // se clicar "Adiar", pergunta de novo depois disso
+  const ESPERA_ENTRE_PASSOS_MINUTOS = 2;  // espera entre Importar e Atualizar
+  const ESPERA_ANTES_DE_CONFIRMAR_MINUTOS = 10; // espera silenciosa após Confirmar no Atualizar Pedidos, antes do popup "deu certo?"
+  const HORA_INICIO_EXPEDIENTE = 8;       // 8h
+  const HORA_FIM_EXPEDIENTE = 18;         // 18h
+  const DIAS_UTEIS = [1, 2, 3, 4, 5];     // seg(1) a sex(5); dom=0, sáb=6
+
+  const URL_TAREFAS = 'https://3rigoiania-go.sistemaasgard.com.br/app/v1/#/tarefas';
+
+  function log(msg) {
+    console.log('[' + NOME_SCRIPT + '] ' + msg);
+  }
+
+  // ---------- Toast visual ----------
+
+  function criarToastContainer() {
+    let container = document.getElementById('__sentinela_onr_toast');
+    if (container) return container;
+
+    container = document.createElement('div');
+    container.id = '__sentinela_onr_toast';
+    container.style.position = 'fixed';
+    container.style.top = '16px';
+    container.style.right = '16px';
+    container.style.zIndex = '2147483647';
+    container.style.padding = '16px 22px';
+    container.style.borderRadius = '8px';
+    container.style.background = 'rgba(20, 40, 90, 0.95)';
+    container.style.color = '#fff';
+    container.style.fontFamily = 'Arial, sans-serif';
+    container.style.fontSize = '16px';
+    container.style.fontWeight = 'bold';
+    container.style.boxShadow = '0 4px 14px rgba(0,0,0,0.35)';
+    container.style.opacity = '0';
+    container.style.transition = 'opacity 0.4s ease';
+    container.style.pointerEvents = 'none';
+    container.textContent = '';
+    document.body.appendChild(container);
+    return container;
+  }
+
+  function mostrarToast(mensagem, cor, duracaoMs) {
+    const container = criarToastContainer();
+    container.textContent = mensagem;
+    container.style.background = cor || 'rgba(20, 40, 90, 0.95)';
+    container.style.opacity = '1';
+
+    clearTimeout(container.__hideTimer);
+    container.__hideTimer = setTimeout(() => {
+      container.style.opacity = '0';
+    }, duracaoMs || 8000);
+  }
+
+  // ---------- Notificação nativa do Chrome ----------
+
+  function pedirPermissaoNotificacao() {
+    if (!('Notification' in window)) {
+      log('Este navegador não suporta notificações nativas.');
+      return;
+    }
+    if (Notification.permission === 'default') {
+      Notification.requestPermission().then((perm) => {
+        log('Permissão de notificação: ' + perm);
+      });
+    }
+  }
+
+  function enviarNotificacao(titulo, corpo, isErro) {
+    if (!('Notification' in window)) return null;
+    if (Notification.permission !== 'granted') {
+      log('Sem permissão de notificação (status: ' + Notification.permission + ').');
+      return null;
+    }
+    try {
+      const notif = new Notification(titulo, {
+        body: corpo,
+        silent: !isErro,
+        tag: 'sentinela-onr-' + Date.now(), // tag única: não substitui uma notificação anterior ainda não vista
+        requireInteraction: true, // fica na tela até o usuário interagir, não some sozinha
+      });
+      // Clicar na notificação traz a aba do Asgard para frente.
+      notif.onclick = () => {
+        window.focus();
+        notif.close();
+      };
+      return notif;
+    } catch (e) {
+      log('Falha ao criar notificação: ' + e.message);
+      return null;
+    }
+  }
+
+  // ---------- Histórico / auditoria (persistido em localStorage) ----------
+
+  const CHAVE_HISTORICO = 'sentinela_onr_historico';
+
+  function lerHistorico() {
+    try {
+      const bruto = localStorage.getItem(CHAVE_HISTORICO);
+      return bruto ? JSON.parse(bruto) : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function registrarHistorico(passo, sucesso) {
+    try {
+      const hist = lerHistorico();
+      hist[passo] = { hora: new Date().toISOString(), sucesso: !!sucesso };
+      localStorage.setItem(CHAVE_HISTORICO, JSON.stringify(hist));
+    } catch (e) {
+      log('Não foi possível salvar histórico: ' + e.message);
+    }
+  }
+
+  function formatarHora(isoString) {
+    if (!isoString) return 'nunca';
+    const d = new Date(isoString);
+    return d.toLocaleDateString('pt-BR') + ' às ' + d.toLocaleTimeString('pt-BR');
+  }
+
+  // ---------- Popup de pergunta (Iniciar / Adiar) ----------
+
+  function criarPopupPergunta() {
+    let overlay = document.getElementById('__sentinela_onr_popup');
+    if (overlay) return overlay;
+
+    overlay = document.createElement('div');
+    overlay.id = '__sentinela_onr_popup';
+    overlay.style.position = 'fixed';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.width = '100%';
+    overlay.style.height = '100%';
+    overlay.style.background = 'rgba(0,0,0,0.45)';
+    overlay.style.zIndex = '2147483647';
+    overlay.style.display = 'flex';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+    overlay.style.fontFamily = 'Arial, sans-serif';
+
+    const box = document.createElement('div');
+    box.style.background = '#182848';
+    box.style.color = '#fff';
+    box.style.padding = '28px 32px';
+    box.style.borderRadius = '10px';
+    box.style.boxShadow = '0 8px 30px rgba(0,0,0,0.5)';
+    box.style.maxWidth = '360px';
+    box.style.textAlign = 'center';
+
+    box.style.position = 'relative';
+
+    const btnFechar = document.createElement('button');
+    btnFechar.textContent = '✕';
+    btnFechar.title = 'Fechar';
+    btnFechar.style.position = 'absolute';
+    btnFechar.style.top = '10px';
+    btnFechar.style.right = '12px';
+    btnFechar.style.background = 'transparent';
+    btnFechar.style.border = 'none';
+    btnFechar.style.color = '#aaa';
+    btnFechar.style.fontSize = '16px';
+    btnFechar.style.cursor = 'pointer';
+    btnFechar.style.lineHeight = '1';
+    btnFechar.style.padding = '4px';
+
+    const titulo = document.createElement('div');
+    titulo.textContent = 'Sentinela ONR';
+    titulo.style.fontSize = '18px';
+    titulo.style.fontWeight = 'bold';
+    titulo.style.marginBottom = '10px';
+
+    const texto = document.createElement('div');
+    texto.textContent = 'Hora de atualizar os pedidos do ONR - E-Protocolo. Iniciar agora?';
+    texto.style.fontSize = '14px';
+    texto.style.marginBottom = '20px';
+    texto.style.lineHeight = '1.4';
+
+    const botoes = document.createElement('div');
+    botoes.style.display = 'flex';
+    botoes.style.gap = '12px';
+    botoes.style.justifyContent = 'center';
+
+    const btnSim = document.createElement('button');
+    btnSim.textContent = 'Sim, iniciar';
+    btnSim.style.background = '#2563eb';
+    btnSim.style.color = '#fff';
+    btnSim.style.border = 'none';
+    btnSim.style.padding = '10px 18px';
+    btnSim.style.borderRadius = '6px';
+    btnSim.style.cursor = 'pointer';
+    btnSim.style.fontSize = '14px';
+    btnSim.style.fontWeight = 'bold';
+
+    const btnAdiar = document.createElement('button');
+    btnAdiar.textContent = 'Adiar ' + ADIAR_MINUTOS + ' min';
+    btnAdiar.style.background = 'transparent';
+    btnAdiar.style.color = '#fff';
+    btnAdiar.style.border = '1px solid #fff';
+    btnAdiar.style.padding = '10px 18px';
+    btnAdiar.style.borderRadius = '6px';
+    btnAdiar.style.cursor = 'pointer';
+    btnAdiar.style.fontSize = '14px';
+
+    botoes.appendChild(btnSim);
+    botoes.appendChild(btnAdiar);
+    box.appendChild(btnFechar);
+    box.appendChild(titulo);
+    box.appendChild(texto);
+    box.appendChild(botoes);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    overlay.__btnSim = btnSim;
+    overlay.__btnAdiar = btnAdiar;
+    overlay.__btnFechar = btnFechar;
+
+    return overlay;
+  }
+
+  // Retorna 'sim', 'adiar' ou 'fechar' conforme o botão clicado.
+  function perguntarSeQuerIniciar() {
+    return new Promise((resolve) => {
+      const overlay = criarPopupPergunta();
+      overlay.style.display = 'flex';
+
+      const limpar = () => {
+        overlay.style.display = 'none';
+        overlay.__btnSim.onclick = null;
+        overlay.__btnAdiar.onclick = null;
+        overlay.__btnFechar.onclick = null;
+      };
+
+      overlay.__btnSim.onclick = () => {
+        limpar();
+        resolve('sim');
+      };
+      overlay.__btnAdiar.onclick = () => {
+        limpar();
+        resolve('adiar');
+      };
+      overlay.__btnFechar.onclick = () => {
+        limpar();
+        resolve('fechar');
+      };
+    });
+  }
+
+  // ---------- Popup de confirmação pós-autenticação (Sim / Não / Fechar aba) ----------
+
+  function criarPopupConfirmacao() {
+    let overlay = document.getElementById('__sentinela_onr_popup_confirma');
+    if (overlay) return overlay;
+
+    overlay = document.createElement('div');
+    overlay.id = '__sentinela_onr_popup_confirma';
+    overlay.style.position = 'fixed';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.width = '100%';
+    overlay.style.height = '100%';
+    overlay.style.background = 'rgba(0,0,0,0.45)';
+    overlay.style.zIndex = '2147483647';
+    overlay.style.display = 'none';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+    overlay.style.fontFamily = 'Arial, sans-serif';
+
+    const box = document.createElement('div');
+    box.style.background = '#182848';
+    box.style.color = '#fff';
+    box.style.padding = '28px 32px';
+    box.style.borderRadius = '10px';
+    box.style.boxShadow = '0 8px 30px rgba(0,0,0,0.5)';
+    box.style.maxWidth = '380px';
+    box.style.textAlign = 'center';
+
+    const titulo = document.createElement('div');
+    titulo.textContent = 'Sentinela ONR';
+    titulo.style.fontSize = '18px';
+    titulo.style.fontWeight = 'bold';
+    titulo.style.marginBottom = '10px';
+
+    const texto = document.createElement('div');
+    texto.className = '__sentinela_onr_texto_confirma';
+    texto.style.fontSize = '14px';
+    texto.style.marginBottom = '20px';
+    texto.style.lineHeight = '1.4';
+
+    const botoes = document.createElement('div');
+    botoes.style.display = 'flex';
+    botoes.style.flexWrap = 'wrap';
+    botoes.style.gap = '10px';
+    botoes.style.justifyContent = 'center';
+
+    const btnSim = document.createElement('button');
+    btnSim.textContent = 'Sim, deu certo';
+    btnSim.style.background = '#16a34a';
+    btnSim.style.color = '#fff';
+    btnSim.style.border = 'none';
+    btnSim.style.padding = '10px 16px';
+    btnSim.style.borderRadius = '6px';
+    btnSim.style.cursor = 'pointer';
+    btnSim.style.fontSize = '14px';
+    btnSim.style.fontWeight = 'bold';
+
+    const btnNao = document.createElement('button');
+    btnNao.textContent = 'Não, deu problema';
+    btnNao.style.background = '#dc2626';
+    btnNao.style.color = '#fff';
+    btnNao.style.border = 'none';
+    btnNao.style.padding = '10px 16px';
+    btnNao.style.borderRadius = '6px';
+    btnNao.style.cursor = 'pointer';
+    btnNao.style.fontSize = '14px';
+    btnNao.style.fontWeight = 'bold';
+
+    const btnFecharAba = document.createElement('button');
+    btnFecharAba.textContent = 'Sim e fechar aba';
+    btnFecharAba.style.background = 'transparent';
+    btnFecharAba.style.color = '#fff';
+    btnFecharAba.style.border = '1px solid #fff';
+    btnFecharAba.style.padding = '10px 16px';
+    btnFecharAba.style.borderRadius = '6px';
+    btnFecharAba.style.cursor = 'pointer';
+    btnFecharAba.style.fontSize = '14px';
+
+    botoes.appendChild(btnSim);
+    botoes.appendChild(btnFecharAba);
+    botoes.appendChild(btnNao);
+    box.appendChild(titulo);
+    box.appendChild(texto);
+    box.appendChild(botoes);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    overlay.__texto = texto;
+    overlay.__btnSim = btnSim;
+    overlay.__btnNao = btnNao;
+    overlay.__btnFecharAba = btnFecharAba;
+
+    return overlay;
+  }
+
+  // Pergunta se o passo (Importar/Atualizar) deu certo. Retorna 'sim', 'sim-fechar-aba' ou 'nao'.
+  function perguntarSeDeuCerto(nomeBotaoMenu) {
+    return new Promise((resolve) => {
+      const overlay = criarPopupConfirmacao();
+      overlay.__texto.textContent = 'Você autenticou o certificado para "' + nomeBotaoMenu + '". Foi concluído com sucesso?';
+      overlay.style.display = 'flex';
+
+      const limpar = () => {
+        overlay.style.display = 'none';
+        overlay.__btnSim.onclick = null;
+        overlay.__btnNao.onclick = null;
+        overlay.__btnFecharAba.onclick = null;
+      };
+
+      overlay.__btnSim.onclick = () => {
+        limpar();
+        resolve('sim');
+      };
+      overlay.__btnFecharAba.onclick = () => {
+        limpar();
+        resolve('sim-fechar-aba');
+      };
+      overlay.__btnNao.onclick = () => {
+        limpar();
+        resolve('nao');
+      };
+    });
+  }
+
+  // ---------- Painel flutuante de auditoria ----------
+
+  // Ícone do botão flutuante (imagem fornecida pelo usuário, redimensionada para 64x64
+  // e embutida como data URI, pra não depender de nenhum arquivo externo).
+  const ICONE_FAB_DATA_URI = 'data:image/png;base64,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';
+
+  function criarBotaoFlutuante() {
+    let btn = document.getElementById('__sentinela_onr_fab');
+    if (btn) return btn;
+
+    btn = document.createElement('button');
+    btn.id = '__sentinela_onr_fab';
+    btn.title = 'Sentinela ONR — auditoria';
+    btn.style.position = 'fixed';
+    btn.style.bottom = '16px';
+    btn.style.right = '16px';
+    btn.style.zIndex = '2147483646';
+    btn.style.width = '48px';
+    btn.style.height = '48px';
+    btn.style.borderRadius = '50%';
+    btn.style.border = 'none';
+    btn.style.padding = '0';
+    btn.style.overflow = 'hidden';
+    btn.style.background = 'rgba(20, 40, 90, 0.95)';
+    btn.style.cursor = 'pointer';
+    btn.style.boxShadow = '0 2px 10px rgba(0,0,0,0.4)';
+
+    const img = document.createElement('img');
+    img.src = ICONE_FAB_DATA_URI;
+    img.style.width = '100%';
+    img.style.height = '100%';
+    img.style.objectFit = 'cover';
+    img.style.display = 'block';
+    btn.appendChild(img);
+
+    document.body.appendChild(btn);
+    return btn;
+  }
+
+  function criarPainelAuditoria() {
+    let painel = document.getElementById('__sentinela_onr_painel');
+    if (painel) return painel;
+
+    painel = document.createElement('div');
+    painel.id = '__sentinela_onr_painel';
+    painel.style.position = 'fixed';
+    painel.style.bottom = '72px';
+    painel.style.right = '16px';
+    painel.style.zIndex = '2147483646';
+    painel.style.background = '#182848';
+    painel.style.color = '#fff';
+    painel.style.fontFamily = 'Arial, sans-serif';
+    painel.style.padding = '18px 20px';
+    painel.style.borderRadius = '10px';
+    painel.style.boxShadow = '0 8px 30px rgba(0,0,0,0.5)';
+    painel.style.minWidth = '270px';
+    painel.style.display = 'none';
+
+    const titulo = document.createElement('div');
+    titulo.textContent = 'Sentinela ONR — Auditoria';
+    titulo.style.fontSize = '15px';
+    titulo.style.fontWeight = 'bold';
+    titulo.style.marginBottom = '12px';
+
+    // Linha do liga/desliga da automação.
+    const linhaToggle = document.createElement('div');
+    linhaToggle.style.display = 'flex';
+    linhaToggle.style.alignItems = 'center';
+    linhaToggle.style.justifyContent = 'space-between';
+    linhaToggle.style.marginBottom = '14px';
+    linhaToggle.style.padding = '8px 10px';
+    linhaToggle.style.background = 'rgba(255,255,255,0.06)';
+    linhaToggle.style.borderRadius = '6px';
+
+    const labelToggle = document.createElement('span');
+    labelToggle.style.fontSize = '13px';
+    labelToggle.style.fontWeight = 'bold';
+
+    const btnToggle = document.createElement('button');
+    btnToggle.style.border = 'none';
+    btnToggle.style.padding = '6px 12px';
+    btnToggle.style.borderRadius = '5px';
+    btnToggle.style.cursor = 'pointer';
+    btnToggle.style.fontSize = '12px';
+    btnToggle.style.fontWeight = 'bold';
+
+    linhaToggle.appendChild(labelToggle);
+    linhaToggle.appendChild(btnToggle);
+
+    const linhaImportar = document.createElement('div');
+    linhaImportar.style.fontSize = '13px';
+    linhaImportar.style.marginBottom = '6px';
+
+    const linhaAtualizar = document.createElement('div');
+    linhaAtualizar.style.fontSize = '13px';
+    linhaAtualizar.style.marginBottom = '10px';
+
+    const linhaProximo = document.createElement('div');
+    linhaProximo.style.fontSize = '13px';
+    linhaProximo.style.marginBottom = '14px';
+    linhaProximo.style.color = '#93c5fd';
+
+    const btnForcar = document.createElement('button');
+    btnForcar.textContent = 'Forçar execução agora';
+    btnForcar.style.background = '#2563eb';
+    btnForcar.style.color = '#fff';
+    btnForcar.style.border = 'none';
+    btnForcar.style.padding = '9px 14px';
+    btnForcar.style.width = '100%';
+    btnForcar.style.borderRadius = '6px';
+    btnForcar.style.cursor = 'pointer';
+    btnForcar.style.fontSize = '13px';
+    btnForcar.style.fontWeight = 'bold';
+    btnForcar.style.marginBottom = '8px';
+
+    const btnFecharPainel = document.createElement('button');
+    btnFecharPainel.textContent = 'Fechar';
+    btnFecharPainel.style.background = 'transparent';
+    btnFecharPainel.style.color = '#aaa';
+    btnFecharPainel.style.border = '1px solid #555';
+    btnFecharPainel.style.padding = '7px 14px';
+    btnFecharPainel.style.width = '100%';
+    btnFecharPainel.style.borderRadius = '6px';
+    btnFecharPainel.style.cursor = 'pointer';
+    btnFecharPainel.style.fontSize = '12px';
+
+    painel.appendChild(titulo);
+    painel.appendChild(linhaToggle);
+    painel.appendChild(linhaImportar);
+    painel.appendChild(linhaAtualizar);
+    painel.appendChild(linhaProximo);
+    painel.appendChild(btnForcar);
+    painel.appendChild(btnFecharPainel);
+    document.body.appendChild(painel);
+
+    painel.__labelToggle = labelToggle;
+    painel.__btnToggle = btnToggle;
+    painel.__linhaImportar = linhaImportar;
+    painel.__linhaAtualizar = linhaAtualizar;
+    painel.__linhaProximo = linhaProximo;
+    painel.__btnForcar = btnForcar;
+    painel.__btnFecharPainel = btnFecharPainel;
+
+    return painel;
+  }
+
+  function atualizarPainelAuditoria() {
+    const painel = document.getElementById('__sentinela_onr_painel');
+    if (!painel) return;
+    const hist = lerHistorico();
+
+    function textoLinha(nome, entrada) {
+      if (!entrada) return nome + ': nunca executado.';
+      const status = entrada.sucesso ? '✅ sucesso' : '⚠️ falhou';
+      return nome + ': ' + formatarHora(entrada.hora) + ' (' + status + ')';
+    }
+
+    painel.__linhaImportar.textContent = textoLinha('Importar Pedidos', hist['Importar Pedidos']);
+    painel.__linhaAtualizar.textContent = textoLinha('Atualizar Pedidos', hist['Atualizar Pedidos']);
+
+    // Próximo ciclo previsto (Importar + Atualizar disparam juntos, no mesmo evento
+    // agendado — não faz sentido horários separados pros dois).
+    if (!automacaoAtiva) {
+      painel.__linhaProximo.textContent = 'Próximo ciclo: automação desligada.';
+    } else if (proximoCicloPrevistoEm) {
+      painel.__linhaProximo.textContent = 'Próximo ciclo previsto: ' + formatarHora(new Date(proximoCicloPrevistoEm).toISOString());
+    } else {
+      painel.__linhaProximo.textContent = 'Próximo ciclo: em andamento agora.';
+    }
+
+    if (automacaoAtiva) {
+      painel.__labelToggle.textContent = 'Automação: ligada';
+      painel.__btnToggle.textContent = 'Desligar';
+      painel.__btnToggle.style.background = '#dc2626';
+      painel.__btnToggle.style.color = '#fff';
+    } else {
+      painel.__labelToggle.textContent = 'Automação: desligada';
+      painel.__btnToggle.textContent = 'Ligar';
+      painel.__btnToggle.style.background = '#16a34a';
+      painel.__btnToggle.style.color = '#fff';
+    }
+  }
+
+  function inicializarPainelAuditoria(aoForcar, aoAlternarAutomacao) {
+    const fab = criarBotaoFlutuante();
+    const painel = criarPainelAuditoria();
+
+    fab.onclick = () => {
+      atualizarPainelAuditoria();
+      painel.style.display = painel.style.display === 'none' ? 'block' : 'none';
+    };
+
+    painel.__btnFecharPainel.onclick = () => {
+      painel.style.display = 'none';
+    };
+
+    painel.__btnToggle.onclick = () => {
+      aoAlternarAutomacao();
+      atualizarPainelAuditoria();
+    };
+
+    painel.__btnForcar.onclick = () => {
+      painel.style.display = 'none';
+      aoForcar();
+    };
+  }
+
+  // ---------- Utilidades de espera ----------
+
+  function esperar(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // Reduz o texto de um elemento a uma forma comparável: junta espaços/quebras de
+  // linha internas (comuns em templates Vue, ex: "\n  Importar Pedidos\n") em um
+  // espaço só, e tira espaços nas pontas. Também remove caracteres de ícone comuns
+  // que às vezes entram no textContent (ex: glifos de fontes de ícone).
+  function normalizarTexto(s) {
+    return (s || '').replace(/\s+/g, ' ').trim();
+  }
+
+  // Espera até um elemento clicável (por texto) aparecer VISÍVEL na página, checando
+  // periodicamente. Itens de menu/dropdown nem sempre são <button> — podem ser <a>,
+  // <li>, <span> ou <div> (no Asgard, os itens do menu ☰ são <button class="icon ...">
+  // com um ícone + texto dentro) — então checamos vários tipos de elemento clicável,
+  // comparamos o texto normalizado (ignorando espaços/quebras extras), e exigimos que
+  // esteja realmente visível (largura/altura > 0) e não desabilitado.
+  function esperarBotaoPorTexto(texto, timeoutMs) {
+    const alvoNormalizado = normalizarTexto(texto);
+    return new Promise((resolve) => {
+      const inicio = Date.now();
+      const intervalo = setInterval(() => {
+        const candidatos = Array.from(document.querySelectorAll('button, a, li, span, div'));
+        // Primeiro tenta achar uma correspondência exata (mais segura); se não achar
+        // nenhuma, tenta uma correspondência "contém o texto", pro caso do elemento
+        // ter algum caractere extra (ícone) grudado no texto.
+        function candidatoValido(el, comparar) {
+          if (!comparar(normalizarTexto(el.textContent))) return false;
+          if (el.matches && el.matches('[disabled], .disabled')) return false;
+          if (el.closest && el.closest('[disabled]')) return false;
+          const rect = el.getBoundingClientRect();
+          if (!(rect.width > 0 && rect.height > 0)) return false;
+          // Evita pegar um elemento "container" cujo textContent bate só porque
+          // contém outro elemento com esse texto dentro (queremos o nó mais específico).
+          if (el.children.length > 0) {
+            const filhoIgual = Array.from(el.children).some((c) => comparar(normalizarTexto(c.textContent)));
+            if (filhoIgual) return false;
+          }
+          return true;
+        }
+
+        let alvo = candidatos.find((el) => candidatoValido(el, (t) => t === alvoNormalizado));
+        if (!alvo) {
+          alvo = candidatos.find((el) => candidatoValido(el, (t) => t.includes(alvoNormalizado)));
+        }
+
+        if (alvo) {
+          clearInterval(intervalo);
+          resolve(alvo);
+        } else if (Date.now() - inicio > timeoutMs) {
+          clearInterval(intervalo);
+          resolve(null);
+        }
+      }, 300);
+    });
+  }
+
+  function clicar(el) {
+    if (!el) return;
+    // Se o elemento não é naturalmente clicável (ex: um <span> ou <div> de texto dentro
+    // de um <a>/<li> com o handler real), sobe até achar um ancestral que faça sentido
+    // clicar — mas sem passar de 3 níveis, pra não acabar clicando em algo grande demais.
+    let alvo = el;
+    if (!['A', 'BUTTON', 'LI'].includes(alvo.tagName)) {
+      const ancestral = alvo.closest('a, button, li');
+      if (ancestral) alvo = ancestral;
+    }
+    alvo.click();
+    // Alguns componentes Vue (ex: dropdowns baseados em @mousedown em vez de @click)
+    // não respondem a .click() sintético; dispara mousedown/mouseup também por garantia.
+    try {
+      const opts = { bubbles: true, cancelable: true, view: window };
+      alvo.dispatchEvent(new MouseEvent('mousedown', opts));
+      alvo.dispatchEvent(new MouseEvent('mouseup', opts));
+    } catch (e) {
+      // silencioso — o .click() acima já foi tentado.
+    }
+  }
+
+  // ---------- Verificação de horário de expediente ----------
+
+  function dentroDoExpediente() {
+    const agora = new Date();
+    const dia = agora.getDay();
+    const hora = agora.getHours();
+    return DIAS_UTEIS.includes(dia) && hora >= HORA_INICIO_EXPEDIENTE && hora < HORA_FIM_EXPEDIENTE;
+  }
+
+  // ---------- Fluxo principal de um passo (Importar OU Atualizar) ----------
+
+  // Se pedirConfirmacao for false, o script não pergunta se deu certo — assume sucesso
+  // depois de clicar em Confirmar e segue direto (usado no "Importar Pedidos", que é
+  // um passo intermediário). Se for true, mostra o popup de confirmação Sim/Não (usado
+  // só no "Atualizar Pedidos", o passo final do ciclo).
+  async function executarPasso(nomeBotaoMenu, pedirConfirmacao) {
+    log('Iniciando passo: ' + nomeBotaoMenu);
+
+    // Garante que estamos na tela de tarefas, onde o menu ONR - E-Protocolo é aberto.
+    if (!location.href.includes('#/tarefas')) {
+      location.href = URL_TAREFAS;
+      await esperar(3000);
+    }
+
+    // Função auxiliar: acha o botão "Ver Ações" (☰) do modal ONR - E-Protocolo,
+    // usado tanto para checar se o modal já está aberto quanto depois de abri-lo.
+    function acharBotaoVerAcoes() {
+      const el = document.querySelector('[title="Ver Ações"]');
+      if (!el) return null;
+      return el.getBoundingClientRect().width > 0 ? el : null;
+    }
+
+    // Se o modal já estiver aberto (de uma execução anterior recente), não precisa
+    // reabrir o menu lateral nem clicar em nada — já pode seguir direto pro ☰.
+    if (!acharBotaoVerAcoes()) {
+      // O link real e clicável é um <a class="item-menu">, não o <div> que o envolve
+      // (o <div> pai também bate no textContent, mas clicar nele não faz nada).
+      const linkMenuLateral = Array.from(document.querySelectorAll('a.item-menu')).find(
+        (el) => el.textContent.trim() === 'ONR - E-Protocolo'
+      );
+
+      let linkAlvo = linkMenuLateral;
+
+      // Se não achou, o painel de navegação lateral pode estar colapsado — expande
+      // clicando no ícone "Navegação" (identificado pelo atributo title, não por
+      // coordenadas fixas de tela, que variam conforme os banners de aviso no topo).
+      if (!linkAlvo) {
+        const iconeNavegacao = document.querySelector('a[title="Navegação"]');
+        if (iconeNavegacao) {
+          clicar(iconeNavegacao);
+          await esperar(800);
+        }
+        linkAlvo = Array.from(document.querySelectorAll('a.item-menu')).find(
+          (el) => el.textContent.trim() === 'ONR - E-Protocolo'
+        );
+      }
+
+      if (!linkAlvo) {
+        mostrarToast(
+          NOME_SCRIPT + ': não encontrei o menu automaticamente. Abra "ONR - E-Protocolo" manualmente.',
+          'rgba(150, 30, 30, 0.95)',
+          10000
+        );
+        return false;
+      }
+
+      clicar(linkAlvo);
+
+      // Aguarda o modal "ONR - E-Protocolo" realmente aparecer (via o botão ☰ dele)
+      // antes de seguir.
+      const inicioEsperaModal = Date.now();
+      while (!acharBotaoVerAcoes() && Date.now() - inicioEsperaModal < 6000) {
+        await esperar(300);
+      }
+
+      if (!acharBotaoVerAcoes()) {
+        mostrarToast(
+          NOME_SCRIPT + ': cliquei no menu, mas o modal "ONR - E-Protocolo" não abriu. Verifique manualmente.',
+          'rgba(150, 30, 30, 0.95)',
+          10000
+        );
+        return false;
+      }
+    }
+
+    await esperar(500);
+
+    // Clica no botão "Ver Ações" (ícone ☰ do modal), já validado acima como presente,
+    // para abrir o dropdown com "Importar Pedidos" / "Atualizar Pedidos".
+    const btnVerAcoes = acharBotaoVerAcoes();
+    if (!btnVerAcoes) {
+      mostrarToast(NOME_SCRIPT + ': não encontrei o menu de ações (☰). Verifique manualmente.', 'rgba(150, 30, 30, 0.95)', 10000);
+      return false;
+    }
+    clicar(btnVerAcoes);
+    await esperar(700);
+
+    // Procura o item do dropdown. Se não achar de primeira, o dropdown pode ter
+    // fechado sozinho (perda de foco) ou o clique no ☰ não abriu — então tentamos
+    // reabrir com um novo clique no ☰, mas só se o item continuar ausente, pra não
+    // arriscar fechar um dropdown que já esteja aberto (☰ costuma alternar aberto/fechado).
+    let btnAcao = await esperarBotaoPorTexto(nomeBotaoMenu, 3500);
+    if (!btnAcao) {
+      const btnVerAcoes2 = acharBotaoVerAcoes();
+      if (btnVerAcoes2) {
+        clicar(btnVerAcoes2);
+        await esperar(700);
+        btnAcao = await esperarBotaoPorTexto(nomeBotaoMenu, 4500);
+      }
+    }
+
+    if (!btnAcao) {
+      mostrarToast(NOME_SCRIPT + ': não encontrei "' + nomeBotaoMenu + '". Verifique manualmente.', 'rgba(150, 30, 30, 0.95)', 10000);
+      registrarHistorico(nomeBotaoMenu, false);
+      return { sucesso: false, fecharAba: false };
+    }
+    clicar(btnAcao);
+    await esperar(600);
+
+    // Se aparecer a confirmação "Você tem certeza?", clica em Confirmar.
+    const btnConfirmar = await esperarBotaoPorTexto('Confirmar', 3000);
+    if (btnConfirmar) {
+      clicar(btnConfirmar);
+    }
+
+    // A partir daqui, o Asgard/certificado deve pedir autenticação.
+    mostrarToast(
+      NOME_SCRIPT + ': autentique o certificado para "' + nomeBotaoMenu + '"...',
+      'rgba(150, 110, 20, 0.95)',
+      10000
+    );
+    enviarNotificacao(
+      NOME_SCRIPT,
+      'Autentique o certificado para "' + nomeBotaoMenu + '" na aba do Asgard.',
+      false
+    );
+
+    // Só o passo final do ciclo (Atualizar Pedidos) pergunta se deu certo. O passo
+    // intermediário (Importar Pedidos) NÃO pergunta, mas ainda precisa fechar sozinho
+    // o modal de resultado (ex: "Não há mais pedidos para importar") antes de seguir —
+    // senão esse modal fica aberto bloqueando a tela e o próximo passo (Atualizar
+    // Pedidos) falha ao tentar rodar por baixo dele.
+    if (!pedirConfirmacao) {
+      const btnFecharResultado = await esperarBotaoPorTexto('Fechar', 120000); // até 2 min esperando você autenticar
+      if (btnFecharResultado) {
+        clicar(btnFecharResultado);
+        await esperar(400);
+        registrarHistorico(nomeBotaoMenu, true);
+        mostrarToast(NOME_SCRIPT + ': "' + nomeBotaoMenu + '" enviado.', 'rgba(20, 110, 60, 0.95)', 8000);
+        return { sucesso: true, fecharAba: false };
+      } else {
+        registrarHistorico(nomeBotaoMenu, false);
+        mostrarToast(
+          NOME_SCRIPT + ': não detectei a conclusão de "' + nomeBotaoMenu + '". Verifique a tela manualmente antes do próximo passo.',
+          'rgba(150, 30, 30, 0.95)',
+          10000
+        );
+        return { sucesso: false, fecharAba: false };
+      }
+    }
+
+    // No passo final (Atualizar Pedidos), espera 10 min em silêncio (sem toast/aviso
+    // nenhum) antes de mostrar o popup de confirmação — dá tempo real do Asgard
+    // processar e de você autenticar com calma, sem pressa.
+    await esperar(ESPERA_ANTES_DE_CONFIRMAR_MINUTOS * 60 * 1000);
+
+    const resposta = await perguntarSeDeuCerto(nomeBotaoMenu);
+    const sucesso = resposta === 'sim' || resposta === 'sim-fechar-aba';
+    const fecharAba = resposta === 'sim-fechar-aba';
+
+    registrarHistorico(nomeBotaoMenu, sucesso);
+
+    if (sucesso) {
+      mostrarToast(NOME_SCRIPT + ': "' + nomeBotaoMenu + '" concluído.', 'rgba(20, 110, 60, 0.95)', 8000);
+    } else {
+      mostrarToast(
+        NOME_SCRIPT + ': "' + nomeBotaoMenu + '" marcado como não concluído. Verifique manualmente.',
+        'rgba(150, 30, 30, 0.95)',
+        10000
+      );
+    }
+
+    return { sucesso, fecharAba };
+  }
+
+  async function executarCicloCompleto() {
+    log('Ciclo completo iniciado.');
+    const resultadoImportar = await executarPasso('Importar Pedidos', false);
+    if (resultadoImportar.fecharAba) {
+      window.close();
+      return;
+    }
+    if (!resultadoImportar.sucesso) return;
+
+    mostrarToast(NOME_SCRIPT + ': aguardando ' + ESPERA_ENTRE_PASSOS_MINUTOS + ' min antes de atualizar...', null, 6000);
+    await esperar(ESPERA_ENTRE_PASSOS_MINUTOS * 60 * 1000);
+
+    const resultadoAtualizar = await executarPasso('Atualizar Pedidos', true);
+    if (resultadoAtualizar.fecharAba) {
+      window.close();
+      return;
+    }
+    if (resultadoAtualizar.sucesso) {
+      const hora = new Date().toLocaleTimeString('pt-BR');
+      mostrarToast(NOME_SCRIPT + ': atualização de pedidos concluída às ' + hora + '.', 'rgba(20, 110, 60, 0.95)', 10000);
+      enviarNotificacao(NOME_SCRIPT, 'Atualização de pedidos concluída às ' + hora + '.', false);
+    }
+  }
+
+  async function cicloDePergunta() {
+    console.log('[Sentinela ONR][DEBUG] cicloDePergunta disparou às ' + new Date().toLocaleTimeString('pt-BR') + '. automacaoAtiva =', automacaoAtiva, '| document.hidden =', document.hidden);
+    // Automação desligada: fica quieto, não pergunta nada, não agenda o próximo ciclo
+    // sozinho. Só volta a rodar quando você ligar pelo painel de auditoria.
+    if (!automacaoAtiva) {
+      log('Automação desligada — ciclo não executado.');
+      return;
+    }
+
+    if (!dentroDoExpediente()) {
+      log('Fora do horário de expediente. Aguardando próximo ciclo.');
+      agendarProximoCiclo(INTERVALO_CICLO_HORAS * 60 * 60 * 1000);
+      return;
+    }
+
+    // O timer que disparou este ciclo já foi consumido — não há mais nada agendado
+    // até decidirmos o próximo passo (popup, ciclo completo etc.).
+    proximoCicloPrevistoEm = null;
+
+    // Notificação nativa junto do popup, pra avisar mesmo se a aba não estiver em foco.
+    enviarNotificacao(
+      NOME_SCRIPT,
+      'Hora de atualizar os pedidos do ONR - E-Protocolo. Veja a aba do Asgard para iniciar.',
+      false
+    );
+
+    const resposta = await perguntarSeQuerIniciar();
+    if (resposta === 'sim') {
+      await executarCicloCompleto();
+      agendarProximoCiclo(INTERVALO_CICLO_HORAS * 60 * 60 * 1000);
+    } else if (resposta === 'adiar') {
+      log('Adiado por ' + ADIAR_MINUTOS + ' min.');
+      mostrarToast(NOME_SCRIPT + ': ok, pergunto de novo em ' + ADIAR_MINUTOS + ' min.', null, 6000);
+      agendarProximoCiclo(ADIAR_MINUTOS * 60 * 1000);
+    } else {
+      // 'fechar': dispensa sem decidir — só volta a perguntar no próximo ciclo normal (2h).
+      log('Fechado sem decidir. Próxima pergunta no ciclo normal.');
+      agendarProximoCiclo(INTERVALO_CICLO_HORAS * 60 * 60 * 1000);
+    }
+  }
+
+  // Guarda quando o próximo ciclo está realmente agendado para acontecer (timestamp),
+  // pra poder mostrar isso no painel de auditoria. null = nada agendado no momento
+  // (automação desligada, ou rodando um ciclo agora).
+  let proximoCicloPrevistoEm = null;
+
+  function agendarProximoCiclo(delayMs) {
+    console.log('[Sentinela ONR][DEBUG] agendarProximoCiclo(' + delayMs + 'ms) chamado. automacaoAtiva =', automacaoAtiva, '. Stack:', new Error().stack);
+    clearTimeout(window.__sentinelaOnrTimer);
+    if (!automacaoAtiva) {
+      proximoCicloPrevistoEm = null;
+      return;
+    }
+    proximoCicloPrevistoEm = Date.now() + delayMs;
+    window.__sentinelaOnrTimer = setTimeout(cicloDePergunta, delayMs);
+  }
+
+  // Liga/desliga a automação a partir do painel. Ao ligar, começa o primeiro ciclo em
+  // 30s (dando tempo da tela estabilizar) e passa a agendar normalmente. Ao desligar,
+  // cancela qualquer ciclo agendado na hora.
+  function alternarAutomacao() {
+    definirAutomacaoAtiva(!automacaoAtiva, 'alternarAutomacao (clique no painel)');
+    if (automacaoAtiva) {
+      log('Automação ligada pelo painel.');
+      mostrarToast(NOME_SCRIPT + ': automação ligada.', 'rgba(20, 110, 60, 0.95)', 6000);
+      proximoCicloPrevistoEm = Date.now() + 30000;
+      setTimeout(cicloDePergunta, 30000);
+    } else {
+      log('Automação desligada pelo painel.');
+      mostrarToast(NOME_SCRIPT + ': automação desligada.', 'rgba(150, 30, 30, 0.95)', 6000);
+      clearTimeout(window.__sentinelaOnrTimer);
+      proximoCicloPrevistoEm = null;
+    }
+  }
+
+  // Botão flutuante de auditoria: mostra o histórico, permite ligar/desligar a
+  // automação, e forçar o ciclo na hora (ignorando horário de expediente e o
+  // agendamento normal, mas reagenda o próximo ciclo normal de 2h a partir de agora,
+  // pra não rodar duas vezes seguidas). Forçar só funciona com a automação ligada.
+  inicializarPainelAuditoria(() => {
+    if (!automacaoAtiva) {
+      mostrarToast(NOME_SCRIPT + ': ligue a automação antes de forçar a execução.', 'rgba(150, 30, 30, 0.95)', 8000);
+      return;
+    }
+    log('Execução forçada manualmente pelo painel de auditoria.');
+    mostrarToast(NOME_SCRIPT + ': execução forçada manualmente.', null, 6000);
+    clearTimeout(window.__sentinelaOnrTimer);
+    proximoCicloPrevistoEm = null;
+    executarCicloCompleto().then(() => {
+      agendarProximoCiclo(INTERVALO_CICLO_HORAS * 60 * 60 * 1000);
+    });
+  }, alternarAutomacao);
+
+  // Só pra diagnóstico: loga quando a aba entra/sai de segundo plano, e o estado
+  // de automacaoAtiva nesse momento — ajuda a ver se o Chrome throttlando a aba em
+  // segundo plano tem relação com o problema relatado.
+  document.addEventListener('visibilitychange', () => {
+    console.log(
+      '[Sentinela ONR][DEBUG] visibilitychange: document.hidden =', document.hidden,
+      '| hora =', new Date().toLocaleTimeString('pt-BR'),
+      '| automacaoAtiva =', automacaoAtiva,
+      '| timer ativo =', !!window.__sentinelaOnrTimer
+    );
+  });
+
+  log('Script ativo, mas automação DESLIGADA por padrão. Ligue pelo painel (canto inferior direito) quando quiser começar.');
+  mostrarToast(NOME_SCRIPT + ' carregado — automação desligada. Ligue pelo painel.', null, 8000);
+  pedirPermissaoNotificacao();
+  console.log('[Sentinela ONR][DEBUG] Script inicializado. Digite __sentinelaOnrDebug() no console a qualquer momento pra ver o estado atual.');
+})();
