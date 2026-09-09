@@ -1,15 +1,18 @@
 // ==UserScript==
 // @name         Vigia do Ofício
 // @namespace    guilherme.vigia.oficio
-// @version      2.1
+// @version      2.2
 // @author       Guilherme S. Costa
-// @description  Automação desligada por padrão — ligue pelo painel flutuante (canto inferior direito, ícone 👁️). Ligado, simula atividade mínima periódica na aba do oficioeletronico.com.br para evitar que o timeout de inatividade derrube a sessão do certificado enquanto a aba estiver aberta. Mostra um toast na tela e uma notificação nativa do Chrome a cada execução, e sempre uma notificação se algo falhar. O painel mostra a última atividade e permite ligar/desligar.
+// @description  Automação desligada por padrão — ligue pelo painel flutuante (canto inferior direito, ícone 👁️). Ligado, simula atividade mínima periódica na aba do oficioeletronico.com.br para evitar que o timeout de inatividade derrube a sessão do certificado enquanto a aba estiver aberta. As notificações (toast + notificação nativa do Chrome) têm um controle separado, também desligado por padrão, e quando ligadas avisam a cada 20 minutos (não a cada execução). Uma falha ao manter a sessão sempre notifica, independente desse controle. O painel mostra a última atividade e permite ligar/desligar cada coisa.
 // v1.1: adicionado toast visual.
 // v1.2: adicionadas notificações nativas do Chrome (sucesso silencioso, erro com som).
 // v1.3: toast movido para o canto superior direito, maior/mais destacado, duração de 10s.
 // v2.0: (1) Painel flutuante fixo (canto inferior direito, ícone 👁️) com liga/desliga da automação — SEMPRE começa DESLIGADA em toda aba nova (não persiste de propósito); enquanto desligada, o script não simula atividade nem manda nada, só quando ligado manualmente pelo painel. (2) Auditoria: o painel mostra o horário da última atividade simulada (com sucesso/falha), guardado em localStorage — sobrevive a recarregar a página. (3) Notificação nativa mais robusta (tag única por evento, requireInteraction, clique na notificação traz a aba para frente).
 // v2.1: o script agora só inicializa (painel flutuante, atividade simulada, tudo) se a página carregar exatamente em https://oficioeletronico.com.br/ (a página inicial) — em qualquer outro caminho do site, o script fica completamente inativo, sem aparecer nada. Só funciona se o caminho já for "/" no momento do carregamento; navegar internamente pra outras telas sem recarregar não desativa (o script continua rodando na aba já carregada), mas se você recarregar estando em outra tela, ele não ativa.
+// v2.2: (1) Notificações (toast + notificação nativa) agora têm um liga/desliga próprio no painel, SEMPRE desligado por padrão em toda aba nova (mesma lógica de segurança do liga/desliga da automação). A automação de manter a sessão continua rodando a cada 5 min independente disso. (2) Quando as notificações estão ligadas, elas não aparecem mais a cada execução — só a cada 20 minutos, pra não encher a tela de avisos. (3) Uma falha ao manter a sessão sempre notifica (toast de erro + notificação nativa), mesmo com o controle de notificações desligado, porque isso indica um problema real que precisa da sua atenção.
 // @match        https://oficioeletronico.com.br/*
+// @updateURL    https://raw.githubusercontent.com/guilherme3rigoiania/scripts-3ri/main/vigia-do-oficio.user.js
+// @downloadURL  https://raw.githubusercontent.com/guilherme3rigoiania/scripts-3ri/main/vigia-do-oficio.user.js
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
@@ -35,12 +38,27 @@
   // é mais que suficiente e não sobrecarrega nada.
   const INTERVALO_MINUTOS = 5;
 
+  // A cada quantos minutos, no máximo, uma notificação de sucesso (toast + nativa)
+  // pode aparecer — mesmo com a atividade sendo simulada a cada INTERVALO_MINUTOS.
+  // Não afeta a notificação de falha, que é sempre mostrada.
+  const INTERVALO_NOTIFICACAO_MINUTOS = 20;
+
   // Automação começa sempre DESLIGADA em toda aba nova (não persiste entre aberturas
   // da página, de propósito — pra nunca rodar sozinha sem você ligar explicitamente
   // pelo painel). Enquanto desligada, nenhuma atividade é simulada nem notificação
   // aparece — o script fica quieto até você ligar.
   let automacaoAtiva = false;
   let intervaloAtivo = null;
+
+  // Controle separado das notificações (toast + notificação nativa). Também começa
+  // sempre DESLIGADO em toda aba nova, de propósito, e não depende do estado da
+  // automação principal — dá pra manter a sessão ativa sem ficar recebendo avisos.
+  let notificacoesAtivas = false;
+
+  // Marca de quando foi a última notificação de SUCESSO mostrada, pra respeitar o
+  // intervalo de INTERVALO_NOTIFICACAO_MINUTOS. Começa em 0 pra já poder notificar
+  // assim que ligar.
+  let ultimaNotificacaoSucessoEm = 0;
 
   function log(msg) {
     console.log('[' + NOME_SCRIPT + '] ' + msg);
@@ -232,6 +250,31 @@
     linhaToggle.appendChild(labelToggle);
     linhaToggle.appendChild(btnToggle);
 
+    // Linha do liga/desliga das notificações (toast + notificação nativa).
+    const linhaToggleNotif = document.createElement('div');
+    linhaToggleNotif.style.display = 'flex';
+    linhaToggleNotif.style.alignItems = 'center';
+    linhaToggleNotif.style.justifyContent = 'space-between';
+    linhaToggleNotif.style.marginBottom = '14px';
+    linhaToggleNotif.style.padding = '8px 10px';
+    linhaToggleNotif.style.background = 'rgba(255,255,255,0.06)';
+    linhaToggleNotif.style.borderRadius = '6px';
+
+    const labelToggleNotif = document.createElement('span');
+    labelToggleNotif.style.fontSize = '13px';
+    labelToggleNotif.style.fontWeight = 'bold';
+
+    const btnToggleNotif = document.createElement('button');
+    btnToggleNotif.style.border = 'none';
+    btnToggleNotif.style.padding = '6px 12px';
+    btnToggleNotif.style.borderRadius = '5px';
+    btnToggleNotif.style.cursor = 'pointer';
+    btnToggleNotif.style.fontSize = '12px';
+    btnToggleNotif.style.fontWeight = 'bold';
+
+    linhaToggleNotif.appendChild(labelToggleNotif);
+    linhaToggleNotif.appendChild(btnToggleNotif);
+
     const linhaUltimaAtividade = document.createElement('div');
     linhaUltimaAtividade.style.fontSize = '13px';
     linhaUltimaAtividade.style.marginBottom = '14px';
@@ -249,12 +292,15 @@
 
     painel.appendChild(titulo);
     painel.appendChild(linhaToggle);
+    painel.appendChild(linhaToggleNotif);
     painel.appendChild(linhaUltimaAtividade);
     painel.appendChild(btnFecharPainel);
     document.body.appendChild(painel);
 
     painel.__labelToggle = labelToggle;
     painel.__btnToggle = btnToggle;
+    painel.__labelToggleNotif = labelToggleNotif;
+    painel.__btnToggleNotif = btnToggleNotif;
     painel.__linhaUltimaAtividade = linhaUltimaAtividade;
     painel.__btnFecharPainel = btnFecharPainel;
 
@@ -284,9 +330,21 @@
       painel.__btnToggle.style.background = '#16a34a';
       painel.__btnToggle.style.color = '#fff';
     }
+
+    if (notificacoesAtivas) {
+      painel.__labelToggleNotif.textContent = 'Notificações: ligadas';
+      painel.__btnToggleNotif.textContent = 'Desligar';
+      painel.__btnToggleNotif.style.background = '#dc2626';
+      painel.__btnToggleNotif.style.color = '#fff';
+    } else {
+      painel.__labelToggleNotif.textContent = 'Notificações: desligadas';
+      painel.__btnToggleNotif.textContent = 'Ligar';
+      painel.__btnToggleNotif.style.background = '#16a34a';
+      painel.__btnToggleNotif.style.color = '#fff';
+    }
   }
 
-  function inicializarPainelAuditoria(aoAlternarAutomacao) {
+  function inicializarPainelAuditoria(aoAlternarAutomacao, aoAlternarNotificacoes) {
     const fab = criarBotaoFlutuante();
     const painel = criarPainelAuditoria();
 
@@ -301,6 +359,11 @@
 
     painel.__btnToggle.onclick = () => {
       aoAlternarAutomacao();
+      atualizarPainelAuditoria();
+    };
+
+    painel.__btnToggleNotif.onclick = () => {
+      aoAlternarNotificacoes();
       atualizarPainelAuditoria();
     };
   }
@@ -326,15 +389,28 @@
 
       const hora = new Date().toLocaleTimeString('pt-BR');
       log('Atividade simulada em ' + hora);
-      mostrarToast('Sessão mantida ativa às ' + hora);
-      enviarNotificacao(NOME_SCRIPT, 'Sessão mantida ativa às ' + hora, false);
       registrarHistorico(true);
+
+      // Notificação de sucesso (toast + nativa) só aparece se o controle de
+      // notificações estiver ligado, e respeitando o intervalo mínimo entre avisos.
+      if (notificacoesAtivas) {
+        const agora = Date.now();
+        const passouIntervalo = agora - ultimaNotificacaoSucessoEm >= INTERVALO_NOTIFICACAO_MINUTOS * 60 * 1000;
+        if (passouIntervalo) {
+          ultimaNotificacaoSucessoEm = agora;
+          mostrarToast('Sessão mantida ativa às ' + hora);
+          enviarNotificacao(NOME_SCRIPT, 'Sessão mantida ativa às ' + hora, false);
+        }
+      }
     } catch (e) {
       const hora = new Date().toLocaleTimeString('pt-BR');
       log('Erro ao simular atividade: ' + e.message);
+      registrarHistorico(false);
+
+      // Falha sempre notifica, independente do controle de notificações estar
+      // ligado ou desligado — é um problema real que precisa de atenção.
       mostrarToast('Falha ao manter sessão às ' + hora + ' — verifique a aba!', 'rgba(150, 30, 30, 0.95)');
       enviarNotificacao(NOME_SCRIPT + ' — Falha', 'Não foi possível manter a sessão ativa às ' + hora + '. Verifique a aba.', true);
-      registrarHistorico(false);
     }
   }
 
@@ -355,7 +431,21 @@
     }
   }
 
-  inicializarPainelAuditoria(alternarAutomacao);
+  // Liga/desliga o controle de notificações a partir do painel. Independente do
+  // estado da automação principal.
+  function alternarNotificacoes() {
+    notificacoesAtivas = !notificacoesAtivas;
+    if (notificacoesAtivas) {
+      log('Notificações ligadas pelo painel.');
+      ultimaNotificacaoSucessoEm = 0; // permite notificar já na próxima execução
+      mostrarToast(NOME_SCRIPT + ': notificações ligadas (a cada ' + INTERVALO_NOTIFICACAO_MINUTOS + ' min).', 'rgba(20, 110, 60, 0.95)');
+    } else {
+      log('Notificações desligadas pelo painel.');
+      mostrarToast(NOME_SCRIPT + ': notificações desligadas.', 'rgba(150, 30, 30, 0.95)');
+    }
+  }
+
+  inicializarPainelAuditoria(alternarAutomacao, alternarNotificacoes);
 
   log('Script carregado, mas desligado por padrão. Ligue pelo painel (canto inferior direito, 👁️) quando quiser começar.');
   mostrarToast(NOME_SCRIPT + ' carregado — desligado. Ligue pelo painel.');
