@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vigia do Ofício
 // @namespace    guilherme.vigia.oficio
-// @version      2.2
+// @version      2.3
 // @author       Guilherme S. Costa
 // @description  Automação desligada por padrão — ligue pelo painel flutuante (canto inferior direito, ícone 👁️). Ligado, simula atividade mínima periódica na aba do oficioeletronico.com.br para evitar que o timeout de inatividade derrube a sessão do certificado enquanto a aba estiver aberta. As notificações (toast + notificação nativa do Chrome) têm um controle separado, também desligado por padrão, e quando ligadas avisam a cada 20 minutos (não a cada execução). Uma falha ao manter a sessão sempre notifica, independente desse controle. O painel mostra a última atividade e permite ligar/desligar cada coisa.
 // v1.1: adicionado toast visual.
@@ -10,6 +10,7 @@
 // v2.0: (1) Painel flutuante fixo (canto inferior direito, ícone 👁️) com liga/desliga da automação — SEMPRE começa DESLIGADA em toda aba nova (não persiste de propósito); enquanto desligada, o script não simula atividade nem manda nada, só quando ligado manualmente pelo painel. (2) Auditoria: o painel mostra o horário da última atividade simulada (com sucesso/falha), guardado em localStorage — sobrevive a recarregar a página. (3) Notificação nativa mais robusta (tag única por evento, requireInteraction, clique na notificação traz a aba para frente).
 // v2.1: o script agora só inicializa (painel flutuante, atividade simulada, tudo) se a página carregar exatamente em https://oficioeletronico.com.br/ (a página inicial) — em qualquer outro caminho do site, o script fica completamente inativo, sem aparecer nada. Só funciona se o caminho já for "/" no momento do carregamento; navegar internamente pra outras telas sem recarregar não desativa (o script continua rodando na aba já carregada), mas se você recarregar estando em outra tela, ele não ativa.
 // v2.2: (1) Notificações (toast + notificação nativa) agora têm um liga/desliga próprio no painel, SEMPRE desligado por padrão em toda aba nova (mesma lógica de segurança do liga/desliga da automação). A automação de manter a sessão continua rodando a cada 5 min independente disso. (2) Quando as notificações estão ligadas, elas não aparecem mais a cada execução — só a cada 20 minutos, pra não encher a tela de avisos. (3) Uma falha ao manter a sessão sempre notifica (toast de erro + notificação nativa), mesmo com o controle de notificações desligado, porque isso indica um problema real que precisa da sua atenção.
+// v2.3: o script agora também inicializa em https://oficioeletronico.com.br/Home/Index, além da página inicial (/). Continua não ativando em nenhum outro caminho do site.
 // @match        https://oficioeletronico.com.br/*
 // @updateURL    https://raw.githubusercontent.com/guilherme3rigoiania/scripts-3ri/main/vigia-do-oficio.user.js
 // @downloadURL  https://raw.githubusercontent.com/guilherme3rigoiania/scripts-3ri/main/vigia-do-oficio.user.js
@@ -20,13 +21,16 @@
 (function () {
   'use strict';
 
-  // O script só deve funcionar na página inicial (https://oficioeletronico.com.br/),
-  // não em nenhuma outra tela/caminho do site. Se a página carregar em qualquer outro
-  // caminho (ex: /Protocolo/..., /Consulta/...), o script não inicializa nada — nem
-  // toast, nem painel flutuante, nem notificação. Só funciona se o caminho já for "/"
-  // no momento do carregamento; navegar internamente pra lá sem recarregar não ativa
-  // (precisa dar F5 na página inicial).
-  if (location.pathname !== '/' && location.pathname !== '') {
+  // O script só deve funcionar na página inicial (https://oficioeletronico.com.br/
+  // ou https://oficioeletronico.com.br/Home/Index — mesma página, dois caminhos),
+  // não em nenhuma outra tela/caminho do site. Se a página carregar em qualquer
+  // outro caminho (ex: /Protocolo/..., /Consulta/...), o script não inicializa
+  // nada — nem toast, nem painel flutuante, nem notificação. Só funciona se o
+  // caminho já for um desses no momento do carregamento; navegar internamente pra
+  // lá sem recarregar não ativa (precisa dar F5 na página).
+  const CAMINHOS_PERMITIDOS = ['/', '', '/Home/Index'];
+  const caminhoAtual = location.pathname.replace(/\/+$/, ''); // remove barra final, se houver
+  if (!CAMINHOS_PERMITIDOS.includes(location.pathname) && !CAMINHOS_PERMITIDOS.includes(caminhoAtual)) {
     return;
   }
 
