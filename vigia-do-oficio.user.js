@@ -1,16 +1,17 @@
 // ==UserScript==
 // @name         Vigia do Ofício
 // @namespace    guilherme.vigia.oficio
-// @version      2.3
+// @version      2.4
 // @author       Guilherme S. Costa
-// @description  Automação desligada por padrão — ligue pelo painel flutuante (canto inferior direito, ícone 👁️). Ligado, simula atividade mínima periódica na aba do oficioeletronico.com.br para evitar que o timeout de inatividade derrube a sessão do certificado enquanto a aba estiver aberta. As notificações (toast + notificação nativa do Chrome) têm um controle separado, também desligado por padrão, e quando ligadas avisam a cada 20 minutos (não a cada execução). Uma falha ao manter a sessão sempre notifica, independente desse controle. O painel mostra a última atividade e permite ligar/desligar cada coisa.
+// @description  Mantém a sessão do certificado ativa no oficioeletronico.com.br enquanto a aba estiver aberta. Desligado por padrão — ligue pelo painel flutuante (ícone 👁️, lado direito). Ligado, a cada 5 min faz um "ping" real no servidor (requisição à própria página usando a sua sessão), que é o que de fato reinicia o contador de inatividade e impede a queda da sessão; também dispara eventos de atividade na página. Se o servidor derrubar a sessão (redirecionar pro login), você é avisado na hora. As notificações visuais têm liga/desliga próprio, desligado por padrão, e NÃO afetam a manutenção da sessão. Não digita nem armazena nenhuma senha.
 // v1.1: adicionado toast visual.
 // v1.2: adicionadas notificações nativas do Chrome (sucesso silencioso, erro com som).
 // v1.3: toast movido para o canto superior direito, maior/mais destacado, duração de 10s.
-// v2.0: (1) Painel flutuante fixo (canto inferior direito, ícone 👁️) com liga/desliga da automação — SEMPRE começa DESLIGADA em toda aba nova (não persiste de propósito); enquanto desligada, o script não simula atividade nem manda nada, só quando ligado manualmente pelo painel. (2) Auditoria: o painel mostra o horário da última atividade simulada (com sucesso/falha), guardado em localStorage — sobrevive a recarregar a página. (3) Notificação nativa mais robusta (tag única por evento, requireInteraction, clique na notificação traz a aba para frente).
-// v2.1: o script agora só inicializa (painel flutuante, atividade simulada, tudo) se a página carregar exatamente em https://oficioeletronico.com.br/ (a página inicial) — em qualquer outro caminho do site, o script fica completamente inativo, sem aparecer nada. Só funciona se o caminho já for "/" no momento do carregamento; navegar internamente pra outras telas sem recarregar não desativa (o script continua rodando na aba já carregada), mas se você recarregar estando em outra tela, ele não ativa.
-// v2.2: (1) Notificações (toast + notificação nativa) agora têm um liga/desliga próprio no painel, SEMPRE desligado por padrão em toda aba nova (mesma lógica de segurança do liga/desliga da automação). A automação de manter a sessão continua rodando a cada 5 min independente disso. (2) Quando as notificações estão ligadas, elas não aparecem mais a cada execução — só a cada 20 minutos, pra não encher a tela de avisos. (3) Uma falha ao manter a sessão sempre notifica (toast de erro + notificação nativa), mesmo com o controle de notificações desligado, porque isso indica um problema real que precisa da sua atenção.
-// v2.3: o script agora também inicializa em https://oficioeletronico.com.br/Home/Index, além da página inicial (/). Continua não ativando em nenhum outro caminho do site.
+// v2.0: (1) Painel flutuante fixo (ícone 👁️) com liga/desliga da automação — SEMPRE começa DESLIGADA em toda aba nova (não persiste de propósito). (2) Auditoria: o painel mostra o horário da última atividade (com sucesso/falha), guardado em localStorage. (3) Notificação nativa mais robusta (tag única por evento, requireInteraction, clique traz a aba para frente).
+// v2.1: o script só inicializa na página inicial (/) do site.
+// v2.2: (1) Notificações ganharam liga/desliga próprio, desligado por padrão. (2) Com notificações ligadas, aviso de sucesso só a cada 20 min. (3) Falha sempre notifica.
+// v2.3: o script também inicializa em /Home/Index, além de /.
+// v2.4: CORREÇÃO IMPORTANTE DO QUE MANTÉM A SESSÃO. (1) Antes a "manutenção" só disparava eventos sintéticos de mouse/teclado na página — isso NÃO garante que o servidor reinicie o timeout de inatividade (o timeout é server-side). Agora, a cada ciclo, o script faz uma requisição real (fetch) à própria página usando a sua sessão, que é o que de fato zera o contador de inatividade no servidor. Os eventos sintéticos continuam (ajudam se o site também tiver detecção de ociosidade no lado do navegador). (2) A manutenção da sessão agora é 100% independente das notificações — ligar/desligar aviso não interfere em nada no keep-alive. (3) Detecção de queda: se o servidor redirecionar o ping pro login, o script avisa que a sessão caiu (toast de erro + notificação, sempre). (4) Toast agora dura 2 segundos (erros duram mais, 8s). (5) Painel mais útil: mostra renovações feitas nesta aba, horário da última e a previsão da próxima.
 // @match        https://oficioeletronico.com.br/*
 // @updateURL    https://raw.githubusercontent.com/guilherme3rigoiania/scripts-3ri/main/vigia-do-oficio.user.js
 // @downloadURL  https://raw.githubusercontent.com/guilherme3rigoiania/scripts-3ri/main/vigia-do-oficio.user.js
@@ -25,9 +26,8 @@
   // ou https://oficioeletronico.com.br/Home/Index — mesma página, dois caminhos),
   // não em nenhuma outra tela/caminho do site. Se a página carregar em qualquer
   // outro caminho (ex: /Protocolo/..., /Consulta/...), o script não inicializa
-  // nada — nem toast, nem painel flutuante, nem notificação. Só funciona se o
-  // caminho já for um desses no momento do carregamento; navegar internamente pra
-  // lá sem recarregar não ativa (precisa dar F5 na página).
+  // nada. Só funciona se o caminho já for um desses no momento do carregamento;
+  // navegar internamente pra lá sem recarregar não ativa (precisa dar F5).
   const CAMINHOS_PERMITIDOS = ['/', '', '/Home/Index'];
   const caminhoAtual = location.pathname.replace(/\/+$/, ''); // remove barra final, se houver
   if (!CAMINHOS_PERMITIDOS.includes(location.pathname) && !CAMINHOS_PERMITIDOS.includes(caminhoAtual)) {
@@ -36,33 +36,36 @@
 
   const NOME_SCRIPT = 'Vigia do Ofício';
 
-  // Intervalo entre "toques" de atividade (em minutos).
-  // O site verifica a sessão a cada 1-2 min e o timeout de inatividade
-  // observado no código gira em torno de 30-60 min, então 5 em 5 min
-  // é mais que suficiente e não sobrecarrega nada.
+  // Intervalo entre renovações da sessão (em minutos). O timeout de inatividade
+  // do site observado gira em torno de 30-60 min, então 5 min tem margem de sobra.
   const INTERVALO_MINUTOS = 5;
 
-  // A cada quantos minutos, no máximo, uma notificação de sucesso (toast + nativa)
-  // pode aparecer — mesmo com a atividade sendo simulada a cada INTERVALO_MINUTOS.
-  // Não afeta a notificação de falha, que é sempre mostrada.
+  // A cada quantos minutos, no máximo, uma notificação de SUCESSO pode aparecer
+  // (quando as notificações estão ligadas). Não afeta notificação de falha.
   const INTERVALO_NOTIFICACAO_MINUTOS = 20;
 
-  // Automação começa sempre DESLIGADA em toda aba nova (não persiste entre aberturas
-  // da página, de propósito — pra nunca rodar sozinha sem você ligar explicitamente
-  // pelo painel). Enquanto desligada, nenhuma atividade é simulada nem notificação
-  // aparece — o script fica quieto até você ligar.
+  // Duração dos toasts na tela (em ms). Avisos normais somem rápido (2s); avisos de
+  // erro ficam mais tempo (8s), porque indicam um problema que você precisa ver.
+  const TOAST_DURACAO_MS = 2000;
+  const TOAST_DURACAO_ERRO_MS = 8000;
+
+  // Automação (manutenção da sessão) começa SEMPRE DESLIGADA em toda aba nova, de
+  // propósito — pra nunca rodar sozinha sem você ligar explicitamente pelo painel.
   let automacaoAtiva = false;
   let intervaloAtivo = null;
 
-  // Controle separado das notificações (toast + notificação nativa). Também começa
-  // sempre DESLIGADO em toda aba nova, de propósito, e não depende do estado da
-  // automação principal — dá pra manter a sessão ativa sem ficar recebendo avisos.
+  // Controle separado das notificações visuais (toast + notificação nativa). Também
+  // começa SEMPRE DESLIGADO. NÃO afeta a manutenção da sessão de forma nenhuma.
   let notificacoesAtivas = false;
 
-  // Marca de quando foi a última notificação de SUCESSO mostrada, pra respeitar o
-  // intervalo de INTERVALO_NOTIFICACAO_MINUTOS. Começa em 0 pra já poder notificar
-  // assim que ligar.
+  // Marca de quando foi a última notificação de SUCESSO mostrada (pra respeitar o
+  // intervalo mínimo entre avisos). Começa em 0 pra já poder notificar na 1ª vez.
   let ultimaNotificacaoSucessoEm = 0;
+
+  // Contadores/estado só pra exibir no painel (não afetam a lógica).
+  let contadorRenovacoes = 0;
+  let proximaRenovacaoEm = 0; // timestamp (ms) previsto da próxima renovação
+  let renovacaoEmAndamento = false; // evita pings sobrepostos
 
   function log(msg) {
     console.log('[' + NOME_SCRIPT + '] ' + msg);
@@ -96,7 +99,7 @@
     return container;
   }
 
-  function mostrarToast(mensagem, cor) {
+  function mostrarToast(mensagem, cor, duracaoMs) {
     const container = criarToastContainer();
     container.textContent = mensagem;
     container.style.background = cor || 'rgba(20, 40, 90, 0.92)';
@@ -105,7 +108,7 @@
     clearTimeout(container.__hideTimer);
     container.__hideTimer = setTimeout(() => {
       container.style.opacity = '0';
-    }, 10000);
+    }, duracaoMs || TOAST_DURACAO_MS);
   }
 
   // ---------- Notificação nativa do Chrome ----------
@@ -133,7 +136,7 @@
         body: corpo,
         icon: 'https://oficioeletronico.com.br/Content/Images/img-logo-oficio-interno.png',
         silent: !isErro, // erro pode tocar som, sucesso fica silencioso
-        tag: 'vigia-do-oficio-' + Date.now(), // tag única: não substitui uma notificação anterior ainda não vista
+        tag: 'vigia-do-oficio-' + Date.now(), // tag única: não substitui uma anterior ainda não vista
         requireInteraction: isErro, // erro fica na tela até você interagir; sucesso some sozinho
       });
       notif.onclick = () => {
@@ -160,9 +163,9 @@
     }
   }
 
-  function registrarHistorico(sucesso) {
+  function registrarHistorico(sucesso, detalhe) {
     try {
-      const hist = { hora: new Date().toISOString(), sucesso: !!sucesso };
+      const hist = { hora: new Date().toISOString(), sucesso: !!sucesso, detalhe: detalhe || '' };
       localStorage.setItem(CHAVE_HISTORICO, JSON.stringify(hist));
     } catch (e) {
       log('Não foi possível salvar histórico: ' + e.message);
@@ -173,6 +176,11 @@
     if (!isoString) return 'nunca';
     const d = new Date(isoString);
     return d.toLocaleDateString('pt-BR') + ' às ' + d.toLocaleTimeString('pt-BR');
+  }
+
+  function formatarHoraCurta(timestampMs) {
+    if (!timestampMs) return '—';
+    return new Date(timestampMs).toLocaleTimeString('pt-BR');
   }
 
   // ---------- Painel flutuante de auditoria ----------
@@ -220,21 +228,21 @@
     painel.style.padding = '18px 20px';
     painel.style.borderRadius = '10px';
     painel.style.boxShadow = '0 8px 30px rgba(0,0,0,0.5)';
-    painel.style.minWidth = '270px';
+    painel.style.minWidth = '280px';
     painel.style.display = 'none';
 
     const titulo = document.createElement('div');
-    titulo.textContent = 'Vigia do Ofício — Auditoria';
+    titulo.textContent = 'Vigia do Ofício';
     titulo.style.fontSize = '15px';
     titulo.style.fontWeight = 'bold';
     titulo.style.marginBottom = '12px';
 
-    // Linha do liga/desliga da automação.
+    // Linha do liga/desliga da automação (manutenção da sessão).
     const linhaToggle = document.createElement('div');
     linhaToggle.style.display = 'flex';
     linhaToggle.style.alignItems = 'center';
     linhaToggle.style.justifyContent = 'space-between';
-    linhaToggle.style.marginBottom = '14px';
+    linhaToggle.style.marginBottom = '10px';
     linhaToggle.style.padding = '8px 10px';
     linhaToggle.style.background = 'rgba(255,255,255,0.06)';
     linhaToggle.style.borderRadius = '6px';
@@ -254,7 +262,7 @@
     linhaToggle.appendChild(labelToggle);
     linhaToggle.appendChild(btnToggle);
 
-    // Linha do liga/desliga das notificações (toast + notificação nativa).
+    // Linha do liga/desliga das notificações visuais.
     const linhaToggleNotif = document.createElement('div');
     linhaToggleNotif.style.display = 'flex';
     linhaToggleNotif.style.alignItems = 'center';
@@ -279,9 +287,22 @@
     linhaToggleNotif.appendChild(labelToggleNotif);
     linhaToggleNotif.appendChild(btnToggleNotif);
 
+    // Bloco de status (renovações, última, próxima).
+    const blocoStatus = document.createElement('div');
+    blocoStatus.style.fontSize = '12.5px';
+    blocoStatus.style.lineHeight = '1.6';
+    blocoStatus.style.marginBottom = '14px';
+    blocoStatus.style.padding = '10px 12px';
+    blocoStatus.style.background = 'rgba(0,0,0,0.18)';
+    blocoStatus.style.borderRadius = '6px';
+
     const linhaUltimaAtividade = document.createElement('div');
-    linhaUltimaAtividade.style.fontSize = '13px';
-    linhaUltimaAtividade.style.marginBottom = '14px';
+    const linhaProxima = document.createElement('div');
+    const linhaContador = document.createElement('div');
+
+    blocoStatus.appendChild(linhaUltimaAtividade);
+    blocoStatus.appendChild(linhaProxima);
+    blocoStatus.appendChild(linhaContador);
 
     const btnFecharPainel = document.createElement('button');
     btnFecharPainel.textContent = 'Fechar';
@@ -297,7 +318,7 @@
     painel.appendChild(titulo);
     painel.appendChild(linhaToggle);
     painel.appendChild(linhaToggleNotif);
-    painel.appendChild(linhaUltimaAtividade);
+    painel.appendChild(blocoStatus);
     painel.appendChild(btnFecharPainel);
     document.body.appendChild(painel);
 
@@ -306,6 +327,8 @@
     painel.__labelToggleNotif = labelToggleNotif;
     painel.__btnToggleNotif = btnToggleNotif;
     painel.__linhaUltimaAtividade = linhaUltimaAtividade;
+    painel.__linhaProxima = linhaProxima;
+    painel.__linhaContador = linhaContador;
     painel.__btnFecharPainel = btnFecharPainel;
 
     return painel;
@@ -317,11 +340,21 @@
     const hist = lerHistorico();
 
     if (!hist.hora) {
-      painel.__linhaUltimaAtividade.textContent = 'Última atividade: nunca executada.';
+      painel.__linhaUltimaAtividade.textContent = 'Última renovação: nunca.';
     } else {
-      const status = hist.sucesso ? '✅ sucesso' : '⚠️ falhou';
-      painel.__linhaUltimaAtividade.textContent = 'Última atividade: ' + formatarHora(hist.hora) + ' (' + status + ')';
+      const status = hist.sucesso ? '✅ ok' : '⚠️ falhou';
+      let txt = 'Última renovação: ' + formatarHora(hist.hora) + ' (' + status + ')';
+      if (!hist.sucesso && hist.detalhe) txt += ' — ' + hist.detalhe;
+      painel.__linhaUltimaAtividade.textContent = txt;
     }
+
+    if (automacaoAtiva && proximaRenovacaoEm) {
+      painel.__linhaProxima.textContent = 'Próxima renovação prevista: ' + formatarHoraCurta(proximaRenovacaoEm);
+    } else {
+      painel.__linhaProxima.textContent = 'Próxima renovação prevista: —';
+    }
+
+    painel.__linhaContador.textContent = 'Renovações nesta aba: ' + contadorRenovacoes;
 
     if (automacaoAtiva) {
       painel.__labelToggle.textContent = 'Vigia: ligado';
@@ -336,12 +369,12 @@
     }
 
     if (notificacoesAtivas) {
-      painel.__labelToggleNotif.textContent = 'Notificações: ligadas';
+      painel.__labelToggleNotif.textContent = 'Avisos na tela: ligados';
       painel.__btnToggleNotif.textContent = 'Desligar';
       painel.__btnToggleNotif.style.background = '#dc2626';
       painel.__btnToggleNotif.style.color = '#fff';
     } else {
-      painel.__labelToggleNotif.textContent = 'Notificações: desligadas';
+      painel.__labelToggleNotif.textContent = 'Avisos na tela: desligados';
       painel.__btnToggleNotif.textContent = 'Ligar';
       painel.__btnToggleNotif.style.background = '#16a34a';
       painel.__btnToggleNotif.style.color = '#fff';
@@ -372,86 +405,148 @@
     };
   }
 
-  // ---------- Lógica principal ----------
+  // ---------- Lógica principal: manter a sessão viva ----------
 
-  function simularAtividade() {
+  // Dispara eventos de atividade na página (ajuda se o SITE tiver detecção de
+  // ociosidade no lado do navegador). Sozinho NÃO basta — ver pingServidor().
+  function dispararEventosAtividade() {
+    const evtMove = new MouseEvent('mousemove', {
+      bubbles: true,
+      cancelable: true,
+      clientX: Math.floor(Math.random() * 100) + 10,
+      clientY: Math.floor(Math.random() * 100) + 10,
+    });
+    document.dispatchEvent(evtMove);
+
+    const evtKey = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: 'Shift',
+    });
+    document.dispatchEvent(evtKey);
+  }
+
+  // Faz uma requisição REAL ao servidor usando a sua sessão. É isso que de fato
+  // reinicia o contador de inatividade no servidor. Retorna um objeto descrevendo
+  // o resultado, inclusive se a sessão parece ter caído (redirecionou pro login).
+  async function pingServidor() {
+    const resp = await fetch(location.href, {
+      method: 'GET',
+      credentials: 'include',
+      cache: 'no-store',
+      redirect: 'follow',
+    });
+
+    // Heurística de queda de sessão: se o servidor redirecionou a requisição pra
+    // uma tela de login/autenticação, a sessão provavelmente caiu.
+    const urlFinal = (resp.url || '').toLowerCase();
+    const caiu = resp.redirected && /(login|signin|entrar|autentic|acesso)/.test(urlFinal);
+
+    return { ok: resp.ok && !caiu, status: resp.status, caiu: caiu, urlFinal: resp.url };
+  }
+
+  // Ciclo completo de renovação da sessão. Independente das notificações.
+  async function renovarSessao(origem) {
+    if (renovacaoEmAndamento) {
+      log('Renovação já em andamento, pulando (origem: ' + (origem || 'timer') + ').');
+      return;
+    }
+    renovacaoEmAndamento = true;
+
+    const hora = new Date().toLocaleTimeString('pt-BR');
     try {
-      const evtMove = new MouseEvent('mousemove', {
-        bubbles: true,
-        cancelable: true,
-        clientX: Math.floor(Math.random() * 100) + 10,
-        clientY: Math.floor(Math.random() * 100) + 10,
-      });
-      document.dispatchEvent(evtMove);
+      dispararEventosAtividade();
+      const r = await pingServidor();
 
-      const evtKey = new KeyboardEvent('keydown', {
-        bubbles: true,
-        cancelable: true,
-        key: 'Shift',
-      });
-      document.dispatchEvent(evtKey);
+      if (r.ok) {
+        contadorRenovacoes += 1;
+        log('Sessão renovada em ' + hora + ' (HTTP ' + r.status + ', renovação #' + contadorRenovacoes + ').');
+        registrarHistorico(true);
 
-      const hora = new Date().toLocaleTimeString('pt-BR');
-      log('Atividade simulada em ' + hora);
-      registrarHistorico(true);
-
-      // Notificação de sucesso (toast + nativa) só aparece se o controle de
-      // notificações estiver ligado, e respeitando o intervalo mínimo entre avisos.
-      if (notificacoesAtivas) {
-        const agora = Date.now();
-        const passouIntervalo = agora - ultimaNotificacaoSucessoEm >= INTERVALO_NOTIFICACAO_MINUTOS * 60 * 1000;
-        if (passouIntervalo) {
-          ultimaNotificacaoSucessoEm = agora;
-          mostrarToast('Sessão mantida ativa às ' + hora);
-          enviarNotificacao(NOME_SCRIPT, 'Sessão mantida ativa às ' + hora, false);
+        // Notificação de sucesso só se o aviso estiver ligado e respeitando o intervalo.
+        if (notificacoesAtivas) {
+          const agora = Date.now();
+          if (agora - ultimaNotificacaoSucessoEm >= INTERVALO_NOTIFICACAO_MINUTOS * 60 * 1000) {
+            ultimaNotificacaoSucessoEm = agora;
+            mostrarToast('Sessão mantida ativa às ' + hora);
+            enviarNotificacao(NOME_SCRIPT, 'Sessão mantida ativa às ' + hora, false);
+          }
         }
+      } else if (r.caiu) {
+        // Sessão caiu: AVISA SEMPRE, independente do controle de notificações.
+        log('Sessão parece ter CAÍDO em ' + hora + ' (redirecionou para ' + r.urlFinal + ').');
+        registrarHistorico(false, 'sessão caiu (redirecionou pro login)');
+        mostrarToast('A sessão caiu! Faça login de novo às ' + hora + '.', 'rgba(150, 30, 30, 0.95)', TOAST_DURACAO_ERRO_MS);
+        enviarNotificacao(NOME_SCRIPT + ' — Sessão caiu', 'A sessão do certificado caiu. Entre de novo no oficioeletronico.', true);
+      } else {
+        log('Ping respondeu HTTP ' + r.status + ' em ' + hora + '.');
+        registrarHistorico(false, 'HTTP ' + r.status);
+        mostrarToast('Resposta inesperada do servidor (HTTP ' + r.status + ') às ' + hora + '.', 'rgba(150, 30, 30, 0.95)', TOAST_DURACAO_ERRO_MS);
+        enviarNotificacao(NOME_SCRIPT + ' — Atenção', 'O servidor respondeu HTTP ' + r.status + ' ao manter a sessão. Verifique a aba.', true);
       }
     } catch (e) {
-      const hora = new Date().toLocaleTimeString('pt-BR');
-      log('Erro ao simular atividade: ' + e.message);
-      registrarHistorico(false);
-
-      // Falha sempre notifica, independente do controle de notificações estar
-      // ligado ou desligado — é um problema real que precisa de atenção.
-      mostrarToast('Falha ao manter sessão às ' + hora + ' — verifique a aba!', 'rgba(150, 30, 30, 0.95)');
-      enviarNotificacao(NOME_SCRIPT + ' — Falha', 'Não foi possível manter a sessão ativa às ' + hora + '. Verifique a aba.', true);
+      // Erro de rede (sem internet, servidor fora, etc). Avisa sempre.
+      log('Erro ao renovar sessão em ' + hora + ': ' + e.message);
+      registrarHistorico(false, 'erro de rede');
+      mostrarToast('Falha ao manter sessão às ' + hora + ' — verifique a conexão/aba!', 'rgba(150, 30, 30, 0.95)', TOAST_DURACAO_ERRO_MS);
+      enviarNotificacao(NOME_SCRIPT + ' — Falha', 'Não foi possível manter a sessão ativa às ' + hora + '. Verifique a conexão e a aba.', true);
+    } finally {
+      renovacaoEmAndamento = false;
+      if (automacaoAtiva) {
+        proximaRenovacaoEm = Date.now() + INTERVALO_MINUTOS * 60 * 1000;
+      }
+      atualizarPainelAuditoria();
     }
   }
 
-  // Liga/desliga a automação a partir do painel.
+  // Liga/desliga a manutenção da sessão a partir do painel.
   function alternarAutomacao() {
     automacaoAtiva = !automacaoAtiva;
     if (automacaoAtiva) {
       log('Vigia ligado pelo painel.');
-      mostrarToast(NOME_SCRIPT + ': ligado.', 'rgba(20, 110, 60, 0.95)');
-      simularAtividade(); // primeiro "toque" imediato ao ligar
+      mostrarToast(NOME_SCRIPT + ': ligado — mantendo a sessão.', 'rgba(20, 110, 60, 0.95)');
+      proximaRenovacaoEm = Date.now() + INTERVALO_MINUTOS * 60 * 1000;
+      renovarSessao('ligar'); // renova já na hora de ligar
       clearInterval(intervaloAtivo);
-      intervaloAtivo = setInterval(simularAtividade, INTERVALO_MINUTOS * 60 * 1000);
+      intervaloAtivo = setInterval(() => renovarSessao('timer'), INTERVALO_MINUTOS * 60 * 1000);
     } else {
       log('Vigia desligado pelo painel.');
       mostrarToast(NOME_SCRIPT + ': desligado.', 'rgba(150, 30, 30, 0.95)');
       clearInterval(intervaloAtivo);
       intervaloAtivo = null;
+      proximaRenovacaoEm = 0;
     }
   }
 
-  // Liga/desliga o controle de notificações a partir do painel. Independente do
-  // estado da automação principal.
+  // Liga/desliga apenas os avisos visuais. NÃO afeta a manutenção da sessão.
   function alternarNotificacoes() {
     notificacoesAtivas = !notificacoesAtivas;
     if (notificacoesAtivas) {
-      log('Notificações ligadas pelo painel.');
-      ultimaNotificacaoSucessoEm = 0; // permite notificar já na próxima execução
-      mostrarToast(NOME_SCRIPT + ': notificações ligadas (a cada ' + INTERVALO_NOTIFICACAO_MINUTOS + ' min).', 'rgba(20, 110, 60, 0.95)');
+      log('Avisos na tela ligados pelo painel.');
+      ultimaNotificacaoSucessoEm = 0; // permite avisar já na próxima renovação
+      mostrarToast(NOME_SCRIPT + ': avisos ligados (sucesso a cada ' + INTERVALO_NOTIFICACAO_MINUTOS + ' min).', 'rgba(20, 110, 60, 0.95)');
     } else {
-      log('Notificações desligadas pelo painel.');
-      mostrarToast(NOME_SCRIPT + ': notificações desligadas.', 'rgba(150, 30, 30, 0.95)');
+      log('Avisos na tela desligados pelo painel.');
+      mostrarToast(NOME_SCRIPT + ': avisos desligados (a sessão continua sendo mantida).', 'rgba(150, 30, 30, 0.95)');
     }
   }
 
+  // Se a aba ficou em segundo plano, o Chrome pode atrasar/congelar o timer. Quando
+  // ela volta a ficar visível, checamos se a renovação está atrasada e, se estiver,
+  // renovamos na hora — assim a sessão não fica desprotegida por causa de throttling.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && automacaoAtiva) {
+      const atrasada = !proximaRenovacaoEm || Date.now() >= proximaRenovacaoEm;
+      if (atrasada) {
+        log('Aba voltou ao foco e a renovação estava atrasada — renovando agora.');
+        renovarSessao('visibilidade');
+      }
+    }
+  });
+
   inicializarPainelAuditoria(alternarAutomacao, alternarNotificacoes);
 
-  log('Script carregado, mas desligado por padrão. Ligue pelo painel (canto inferior direito, 👁️) quando quiser começar.');
+  log('Script carregado, mas DESLIGADO por padrão. Ligue pelo painel (ícone 👁️, lado direito) quando quiser começar a manter a sessão.');
   mostrarToast(NOME_SCRIPT + ' carregado — desligado. Ligue pelo painel.');
   pedirPermissaoNotificacao();
 })();
